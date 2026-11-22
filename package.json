@@ -1,7 +1,7 @@
 {
   "name": "talkie",
   "productName": "Talkie",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Push-to-talk walkie-talkie for your team, end-to-end encrypted, without leaving what you are working on.",
   "main": "src/main/main.js",
   "author": "Lead & Allure",
