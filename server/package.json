@@ -1,0 +1,17 @@
+{
+  "name": "talkie-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Talkie relay: forwards end-to-end encrypted voice between team members. It cannot hear anything.",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.18.0"
+  }
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; media-src 'self' blob:; worker-src 'self';">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talkie</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="drag"></div>
+
+<section id="setup" class="screen hidden">
+  <div class="brand"><span class="orb big"></span><h1>Talkie</h1></div>
+  <p class="lead">Push-to-talk for your team. Speak without leaving what you are doing.</p>
+  <label>Your name<input id="setup-name" maxlength="32" placeholder="e.g. Jana" autocomplete="off"></label>
+  <label>Team code<input id="setup-code" maxlength="40" placeholder="TK-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false"></label>
+  <button id="setup-go" class="primary">Join the team</button>
+  <p id="setup-err" class="err"></p>
+  <p class="fine">Voice is end-to-end encrypted. Only the people you talk to can hear it.</p>
+</section>
+
+<section id="app" class="screen hidden">
+  <header>
+    <div class="title"><span class="orb" id="conn-orb"></span><span>Talkie</span><span id="conn-text" class="muted"></span></div>
+    <div class="head-actions">
+      <label class="switch" title="Do not disturb: voice arrives as messages instead of playing out loud">
+        <input type="checkbox" id="dnd"><span class="slider"></span><span class="switch-label">DND</span>
+      </label>
+      <button id="gear" class="icon" title="Settings" aria-label="Settings">&#9881;</button>
+    </div>
+  </header>
+
+  <div id="notice" class="notice hidden"></div>
+  <div id="update" class="notice update hidden"></div>
+
+  <div class="section-title"><span>Who to talk to</span><button id="select-all" class="link">Select all</button></div>
+  <ul id="contacts" class="contacts"></ul>
+  <p id="no-contacts" class="muted small hidden">Nobody else has joined yet. Send them the team code.</p>
+
+  <div class="talk-wrap">
+    <button id="talk" class="talk" aria-label="Hold to talk"><span class="talk-ring"></span><span class="talk-label">Hold to talk</span></button>
+    <p id="talk-hint" class="muted small"></p>
+  </div>
+
+  <div class="section-title"><span>Messages</span><button id="play-next" class="link">Play next</button></div>
+  <ul id="messages" class="messages"></ul>
+  <p id="no-messages" class="muted small">No messages yet.</p>
+</section>
+
+<section id="settings" class="screen hidden">
+  <header><div class="title"><button id="back" class="icon" aria-label="Back">&#8592;</button><span>Settings</span></div></header>
+  <label>Your name<input id="set-name" maxlength="32"></label>
+  <div class="row"><span>Talk shortcut</span><button id="hk-talk" class="key"></button></div>
+  <div class="row"><span>Play next message</span><button id="hk-listen" class="key"></button></div>
+  <p id="hk-msg" class="muted small">Click a shortcut, then press the new keys. Press once to start talking, again to send.</p>
+  <div class="row"><span>Sound when on DND</span><label class="switch"><input type="checkbox" id="sound-dnd"><span class="slider"></span></label></div>
+  <div class="row"><span>Open when computer starts</span><label class="switch"><input type="checkbox" id="login"><span class="slider"></span></label></div>
+  <div class="card">
+    <div class="small muted">Your safety code</div>
+    <div id="my-safety" class="safety"></div>
+    <div class="small muted">To be sure no one is listening in between, check that each teammate sees this same code next to your name on their screen (click a name to see theirs).</div>
+  </div>
+  <div class="row"><span class="muted small" id="version"></span><button id="leave" class="link danger">Leave team</button></div>
+</section>
+
+<script src="audio.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

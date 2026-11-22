@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self';">
+<title>Talkie overlay</title>
+<link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+<div id="wrap">
+  <div id="top" class="hit">
+    <div id="orb" class="orb"></div>
+    <div id="pill" class="pill hidden"></div>
+  </div>
+  <div id="box" class="box hit hidden">
+    <div class="box-head"><span class="dot"></span><span id="box-title"></span></div>
+    <div id="box-sub" class="box-sub"></div>
+    <div class="box-actions">
+      <button id="b-play" class="go">Play</button>
+      <button id="b-wait">Wait 5 min</button>
+      <button id="b-later">Later</button>
+      <button id="b-reply">Reply</button>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+</div>
+<script src="overlay.js"></script>
+</body>
+</html>
