@@ -1,8 +1,8 @@
 html, body { margin: 0; background: transparent; overflow: hidden; font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #04150c; -webkit-user-select: none; user-select: none; }
-#wrap { padding: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+#wrap { padding: 4px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .hidden { display: none !important; }
 #top { display: flex; align-items: center; gap: 8px; cursor: pointer; }
-.orb { width: 22px; height: 22px; border-radius: 50%; background: #2bff88; box-shadow: 0 0 12px rgba(43,255,136,.9), 0 0 2px rgba(0,0,0,.6); flex: none; transition: background .15s; }
+.orb { width: 18px; height: 18px; border-radius: 50%; background: #2bff88; box-shadow: 0 0 12px rgba(43,255,136,.9), 0 0 2px rgba(0,0,0,.6); flex: none; transition: background .15s; }
 .orb.dnd { box-shadow: 0 0 0 3px #ffb547, 0 0 12px rgba(43,255,136,.7); }
 .orb.off { background: #7a8580; box-shadow: 0 0 2px rgba(0,0,0,.6); }
 .orb.talking { background: #ff4d5e; box-shadow: 0 0 16px rgba(255,77,94,.95); animation: pulse 0.9s infinite; }

@@ -214,7 +214,9 @@ function toast(text, ms = 4000) {
 function placeOverlay() {
   if (!overlay) return;
   const wa = screen.getPrimaryDisplay().workArea;
-  overlay.setBounds({ x: wa.x + 10, y: wa.y + 10, width: 380, height: 190 });
+  // Top left, but below the row where windows keep their close/minimise buttons,
+  // and hugging the edge so it rarely covers anything you would click.
+  overlay.setBounds({ x: wa.x, y: wa.y + 40, width: 380, height: 190 });
 }
 
 function createOverlay() {
