@@ -77,12 +77,15 @@ function saveSettings() {
   writeJson(file('settings.json'), settings);
 }
 
-// Private keys are encrypted with the operating system's keychain when it is available.
+// Private keys: on Windows they are encrypted with the system keychain (DPAPI, no prompts).
+// On Mac and Linux they sit in a file only your user account can read, like SSH keys:
+// the Mac keychain would ask for your password after every update of an unsigned app.
+const useKeychain = () => process.platform === 'win32' && safeStorage.isEncryptionAvailable();
 function loadIdentity() {
   const encPath = file('identity.enc');
   const plainPath = file('identity.json');
   try {
-    if (fs.existsSync(encPath) && safeStorage.isEncryptionAvailable()) {
+    if (fs.existsSync(encPath) && useKeychain()) {
       return JSON.parse(safeStorage.decryptString(fs.readFileSync(encPath)));
     }
     if (fs.existsSync(plainPath)) return readJson(plainPath, null);
@@ -93,7 +96,7 @@ function loadIdentity() {
 }
 function saveIdentity(id) {
   fs.mkdirSync(dataDir(), { recursive: true });
-  if (safeStorage.isEncryptionAvailable()) {
+  if (useKeychain()) {
     fs.writeFileSync(file('identity.enc'), safeStorage.encryptString(JSON.stringify(id)), { mode: 0o600 });
   } else {
     writeJson(file('identity.json'), id);

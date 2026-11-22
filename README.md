@@ -36,7 +36,7 @@ Or download the files yourself from the [latest release](https://github.com/Geor
 ## Security
 
 - **End-to-end encrypted.** Each time you talk, your computer makes a new random key, encrypts the voice with it (XSalsa20-Poly1305), and seals that key separately for each person you are talking to (X25519). The relay server only passes sealed packets along: it cannot hear anything, and nor can anyone who breaks into it.
-- **Identity keys stay on your computer**, encrypted with your system keychain (macOS Keychain, Windows DPAPI). Every connection proves who you are by signing a fresh random challenge; there are no passwords to steal.
+- **Identity keys stay on your computer**: on Windows encrypted with the system keychain (DPAPI); on Mac and Linux in a file only your user account can read, the same way SSH keys are kept. Every connection proves who you are by signing a fresh random challenge; there are no passwords to steal.
 - **Joining needs the team code**, which is only used once and then forgotten by the app. The server keeps only a salted hash of it and blocks repeated wrong guesses.
 - **Safety codes.** Each person has a code (Settings, or click "i" next to a name). If the codes match in person, nobody is in the middle. If someone's key ever changes, Talkie warns you and will not send to them until you choose to trust it.
 - **The microphone is only on while you are talking.** The app is locked down: no remote web content, sandboxed pages, a strict content security policy, and only the microphone permission is ever granted.
