@@ -2,15 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self';">
-<title>Talkie overlay</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src 'self' blob:; connect-src 'none'; worker-src 'self';">
+<title>Talkie</title>
 <link rel="stylesheet" href="overlay.css">
 </head>
 <body>
 <div id="wrap">
-  <div id="top" class="hit">
+  <div id="top" class="hit hidden">
+    <div id="pill" class="pill"></div>
     <div id="orb" class="orb"></div>
-    <div id="pill" class="pill hidden"></div>
+  </div>
+  <div id="picker" class="picker hit hidden">
+    <div class="p-head"><span class="p-title">Talk to</span><span id="p-dnd" class="p-dnd hidden">do not disturb is on</span></div>
+    <ul id="p-list"></ul>
+    <div id="p-empty" class="p-empty hidden">Nobody else has joined yet.<br>Send them the invite email. Once someone joins, they appear here.</div>
+    <div id="p-hint" class="p-hint"></div>
   </div>
   <div id="box" class="box hit hidden">
     <div class="box-head"><span class="dot"></span><span id="box-title"></span></div>
@@ -22,8 +28,9 @@
       <button id="b-reply">Reply</button>
     </div>
   </div>
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hit hidden"></div>
 </div>
+<script src="audio.js"></script>
 <script src="overlay.js"></script>
 </body>
 </html>

@@ -16,14 +16,19 @@ const {
   shell,
   net,
 } = require('electron');
+const { spawn } = require('child_process');
 const core = require('./core');
 
 const DISCOVERY_URL = 'https://raw.githubusercontent.com/GeorgeLnA/talkie/relay/server.json';
 const RELEASES_API = 'https://api.github.com/repos/GeorgeLnA/talkie/releases/latest';
 const RELEASES_PAGE = 'https://github.com/GeorgeLnA/talkie/releases/latest';
 const DEFAULT_HOTKEYS = { talk: 'CommandOrControl+Shift+Space', listen: 'CommandOrControl+Shift+Enter' };
-const MAX_MESSAGES = 100;
+const MAX_AUDIO = 100; // voice kept for the last 100 messages
+const MAX_HISTORY = 3000; // text kept much longer
+const HOLD_MS = 260; // held longer than this = hold to talk; shorter = open the picker
 const isMac = process.platform === 'darwin';
+// Lighter on memory and battery: the app draws a few small windows, it needs no graphics chip.
+app.disableHardwareAcceleration();
 
 if (process.env.TALKIE_PROFILE) {
   // lets two copies run side by side for testing
@@ -34,6 +39,11 @@ if (process.env.TALKIE_TEST) {
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+  // the fake microphone can "say" a recorded sentence, to test speech to text
+  if (process.env.TALKIE_TEST_SAY) {
+    app.commandLine.appendSwitch('use-file-for-fake-audio-capture', process.env.TALKIE_TEST_SAY);
+    app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox'); // test only: lets the fake microphone read the file
+  }
 }
 if (!process.env.TALKIE_PROFILE && !app.requestSingleInstanceLock()) {
   app.quit();
@@ -68,6 +78,7 @@ function loadSettings() {
     dnd: false,
     soundInDnd: true,
     openAtLogin: true,
+    jumpBack: false,
     pinned: {},
     ...readJson(file('settings.json'), {}),
   };
@@ -103,14 +114,37 @@ function saveIdentity(id) {
   }
 }
 
-// Messages are kept exactly as they arrived: still encrypted, opened only when played.
+// Messages: voice is kept exactly as it arrived, still encrypted, opened only when played.
+// Our own messages are kept too, sealed to ourselves. Older ones keep only their text.
 let messages = [];
+let chats = {}; // chat key -> { upto, lines, source, at }
 function loadMessages() {
   messages = readJson(file('messages.json'), []);
+  chats = readJson(file('chats.json'), {});
 }
+let saveTimer = null;
 function saveMessages() {
-  messages = messages.slice(-MAX_MESSAGES);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveMessagesNow, 300);
+}
+function saveMessagesNow() {
+  clearTimeout(saveTimer);
+  messages = messages.slice(-MAX_HISTORY);
+  const cut = messages.length - MAX_AUDIO;
+  messages.forEach((m, i) => {
+    if (i < cut && m.chunks) {
+      delete m.chunks;
+      delete m.key;
+    }
+  });
   writeJson(file('messages.json'), messages);
+}
+function saveChats() {
+  writeJson(file('chats.json'), chats);
+}
+function chatKey(m) {
+  const ids = new Set([m.from, ...(m.to || [])]);
+  return [...ids].sort().join(',');
 }
 
 // ---------- app state ----------
@@ -120,7 +154,11 @@ let mainWin = null;
 let overlay = null;
 let tray = null;
 let connState = 'offline';
-let talking = null; // { tid, to, started, pending: [] }
+let talking = null; // { tid, to, started, key, chunks, how }
+let ui = 'idle'; // idle | pending (keys just pressed) | picker | hold (talking while held) | toggle (talking until next press)
+let pickTargets = []; // who is highlighted in the picker
+let helper = null;
+let helperCaps = { transcribe: false, ai: 'unsupported' };
 const live = new Map(); // tid -> message record being received
 const snoozeTimers = new Map();
 let updateInfo = null;
@@ -143,14 +181,39 @@ function memberList() {
       safety: core.safetyCode(m.signPub, m.boxPub),
     }));
 }
-function messageList() {
-  return messages
-    .slice()
-    .reverse()
-    .map((m) => ({ tid: m.tid, from: m.from, fromName: memberName(m.from), at: m.at, dur: m.dur, heard: m.heard, group: (m.to || []).length > 1 }));
+function memberName2(id) {
+  return client && id === client.id ? 'You' : memberName(id);
+}
+function chatList() {
+  const map = new Map();
+  for (const m of messages) {
+    const k = chatKey(m);
+    const c = map.get(k) || { key: k, last: 0, count: 0, unheard: 0 };
+    c.last = Math.max(c.last, m.at || 0);
+    c.count++;
+    if (!m.mine && !m.heard) c.unheard++;
+    c.preview = m.text ? memberName2(m.from) + ': ' + m.text.slice(0, 90) : memberName2(m.from) + ' (voice)';
+    map.set(k, c);
+  }
+  const me = client ? client.id : null;
+  return [...map.values()]
+    .sort((a, b) => b.last - a.last)
+    .map((c) => ({ ...c, names: c.key.split(',').filter((id) => id !== me).map(memberName).join(', ') || 'You' }));
+}
+function chatDetail(key) {
+  const list = messages.filter((m) => chatKey(m) === key);
+  return {
+    key,
+    names: key.split(',').filter((id) => !client || id !== client.id).map(memberName).join(', '),
+    others: key.split(',').filter((id) => !client || id !== client.id),
+    messages: list.map((m) => ({ tid: m.tid, from: memberName2(m.from), mine: !!m.mine, at: m.at, dur: m.dur, text: m.text || '', heard: m.heard, audio: !!m.chunks, transcribing: !!m.transcribing })),
+    summary: chats[key] || null,
+    canSummarise: helperCaps.ai === 'available',
+    aiStatus: helperCaps.ai,
+  };
 }
 function pending() {
-  return messages.filter((m) => !m.heard && !m.snoozedUntil);
+  return messages.filter((m) => !m.mine && !m.heard && !m.snoozedUntil);
 }
 
 function snapshot() {
@@ -164,9 +227,13 @@ function snapshot() {
     soundInDnd: settings.soundInDnd,
     openAtLogin: settings.openAtLogin,
     hotkeys: settings.hotkeys,
-    selected: settings.selected,
+    jumpBack: settings.jumpBack,
+    helper: !!helper,
+    transcribe: helperCaps.transcribe,
+    ai: helperCaps.ai,
     members: memberList(),
-    messages: messageList(),
+    chats: chatList(),
+    pendingCount: pending().length,
     talking: talking ? { to: talking.to.map(memberName), started: talking.started } : null,
     update: updateInfo,
     version: app.getVersion(),
@@ -175,34 +242,71 @@ function snapshot() {
 }
 
 function pushState() {
-  const s = snapshot();
-  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('state', s);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('state', snapshot());
   pushOverlay();
   refreshTray();
 }
 
-// ---------- overlay ----------
+// ---------- overlay (top right, under the clock) ----------
+// It is the only window that is always loaded. It also runs the audio engine.
+// It shows only while something is happening: the picker, talking, a voice coming in, a waiting message.
 let overlayToast = null;
 let liveNow = null; // { tid, name }
+const OW = 330;
+const OH = 440;
+function pickerItems() {
+  const ms = memberList();
+  const items = [];
+  if (ms.length > 1) items.push({ id: '*', name: 'Everyone', to: ms.map((m) => m.id), status: '' });
+  const last = (settings.selected || []).filter((id) => ms.some((m) => m.id === id));
+  if (last.length > 1 && last.length < ms.length) {
+    items.push({ id: 'g:' + last.join(','), name: last.map(memberName).join(' + '), to: last, status: 'last group' });
+  }
+  for (const m of ms) {
+    items.push({ id: m.id, name: m.name, to: [m.id], status: m.keyChanged ? 'check safety code' : !m.online ? 'offline: gets it later' : m.dnd ? 'busy: gets a message' : 'online', online: m.online, dnd: m.dnd, blocked: m.keyChanged });
+  }
+  // highlight whoever you talked to last
+  let hi = 0;
+  const lastKey = last.slice().sort().join(',');
+  const idx = items.findIndex((it) => it.to.slice().sort().join(',') === lastKey);
+  if (idx >= 0) hi = idx;
+  else if (items.length > 1 && items[0].id === '*') hi = 1;
+  return { items, hi };
+}
 function overlayState() {
   const p = pending();
   const first = p[0];
   return {
+    ui,
+    mac: isMac,
+    helper: !!helper,
     dnd: settings.dnd,
     conn: connState,
-    talking: talking ? { to: talking.to.map(memberName), started: talking.started } : null,
+    picker: ui === 'picker' || ui === 'pending' ? pickerItems() : null,
+    talking: talking ? { to: talking.to.map(memberName), started: talking.started, how: talking.how } : null,
     live: liveNow,
     incomingDnd: [...live.values()].filter((r) => !r.playLive).map((r) => memberName(r.from)),
-    pending: first
-      ? { tid: first.tid, from: first.from, name: memberName(first.from), dur: first.dur, count: p.length }
-      : null,
+    pending: first ? { tid: first.tid, from: first.from, name: memberName(first.from), dur: first.dur, count: p.length, text: first.text || '' } : null,
     toast: overlayToast,
-    online: memberList().filter((m) => m.online).length,
     hotkeys: settings.hotkeys,
+    test: !!process.env.TALKIE_TEST, // automated tests stay silent
   };
 }
+function overlayWanted(st) {
+  return !!(st.picker || st.talking || st.live || st.incomingDnd.length || st.pending || st.toast);
+}
 function pushOverlay() {
-  if (overlay && !overlay.isDestroyed()) overlay.webContents.send('overlay', overlayState());
+  if (!overlay || overlay.isDestroyed()) return;
+  const st = overlayState();
+  overlay.webContents.send('overlay', st);
+  const want = overlayWanted(st);
+  if (want && !overlay.isVisible()) {
+    placeOverlay();
+    overlay.showInactive();
+  } else if (!want && overlay.isVisible()) {
+    overlay.setIgnoreMouseEvents(true, { forward: true });
+    overlay.hide();
+  }
 }
 function toast(text, ms = 4000) {
   overlayToast = text;
@@ -216,16 +320,16 @@ function toast(text, ms = 4000) {
 
 function placeOverlay() {
   if (!overlay) return;
-  const wa = screen.getPrimaryDisplay().workArea;
-  // Top left, but below the row where windows keep their close/minimise buttons,
-  // and hugging the edge so it rarely covers anything you would click.
-  overlay.setBounds({ x: wa.x, y: wa.y + 40, width: 380, height: 190 });
+  // the screen the mouse is on, so it appears where you are looking
+  const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const wa = d.workArea;
+  overlay.setBounds({ x: wa.x + wa.width - OW - 4, y: wa.y + 4, width: OW, height: OH });
 }
 
 function createOverlay() {
   overlay = new BrowserWindow({
-    width: 380,
-    height: 190,
+    width: OW,
+    height: OH,
     frame: false,
     transparent: true,
     resizable: false,
@@ -235,9 +339,10 @@ function createOverlay() {
     fullscreenable: false,
     skipTaskbar: true,
     hasShadow: false,
-    focusable: false,
+    focusable: true,
     alwaysOnTop: true,
     show: false,
+    // On a Mac a "panel" can take the arrow keys without pulling you out of the app you are in.
     type: isMac ? 'panel' : 'toolbar',
     webPreferences: securePrefs('overlay-preload.js'),
   });
@@ -245,18 +350,287 @@ function createOverlay() {
   overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlay.setIgnoreMouseEvents(true, { forward: true });
   overlay.loadFile(path.join(__dirname, '..', 'renderer', 'overlay.html'));
-  overlay.once('ready-to-show', () => {
-    placeOverlay();
-    overlay.showInactive();
-    pushOverlay();
+  overlay.webContents.on('did-finish-load', pushOverlay);
+  overlay.on('blur', () => {
+    // clicked somewhere else: close the picker, keep talking if you are
+    if (ui === 'picker') closePicker();
   });
   screen.on('display-metrics-changed', placeOverlay);
-  screen.on('display-added', placeOverlay);
   screen.on('display-removed', placeOverlay);
   hardenContents(overlay.webContents);
 }
+function sendAudio(cmd) {
+  if (overlay && !overlay.isDestroyed()) overlay.webContents.send('audio', cmd);
+}
+function sound(kind) {
+  sendAudio({ cmd: 'sound', kind });
+}
+// ask the audio engine for something and wait for its answer
+const audioCalls = new Map();
+let audioCallId = 0;
+function audioCall(cmd, timeout = 20000) {
+  return new Promise((resolve) => {
+    const rid = ++audioCallId;
+    const t = setTimeout(() => {
+      audioCalls.delete(rid);
+      resolve(null);
+    }, timeout);
+    audioCalls.set(rid, (v) => {
+      clearTimeout(t);
+      resolve(v);
+    });
+    sendAudio({ ...cmd, rid });
+  });
+}
 
-// ---------- main window ----------
+// ---------- picker: choose who to talk to without leaving your app ----------
+function openPicker() {
+  if (!overlay) return;
+  placeOverlay();
+  const { items, hi } = pickerItems();
+  pickTargets = items[hi] ? items[hi].to : [];
+  if (!overlay.isVisible()) overlay.showInactive();
+  overlay.setIgnoreMouseEvents(false);
+  overlay.focus(); // the panel takes the arrow keys; your app stays in front
+}
+function closePicker() {
+  if (ui === 'picker' || ui === 'pending') ui = talking ? ui : 'idle';
+  if (helper) helperSend({ cmd: 'stop-hold' });
+  if (overlay && !overlay.isDestroyed()) {
+    overlay.blur();
+    overlay.setIgnoreMouseEvents(true, { forward: true });
+  }
+  pushOverlay();
+}
+function onTalkKey() {
+  if (!identity || !settings.name) return showMain();
+  if (talking) {
+    // second press while talking sends it
+    stopTalk();
+    return;
+  }
+  if (ui === 'pending' || ui === 'hold') return; // key repeat
+  const wasPicker = ui === 'picker';
+  ui = 'pending';
+  if (!wasPicker) openPicker();
+  sendAudio({ cmd: 'warm' }); // open the microphone early so the first word is not lost
+  pushOverlay();
+  const press = Date.now();
+  if (helper) {
+    helperSend({ cmd: 'watch-hold', id: press });
+    setTimeout(() => {
+      if (ui !== 'pending') return;
+      helperCall({ cmd: 'mods' }, 400).then((m) => {
+        if (ui !== 'pending') return;
+        if (m && m.cmd && m.shift) beginHold();
+        else toPicker();
+      });
+    }, HOLD_MS);
+  } else {
+    // no helper (Windows, Linux): a press opens the picker; a second press talks to the highlighted person
+    if (wasPicker) beginToggle(pickTargets);
+    else toPicker();
+  }
+}
+function toPicker() {
+  ui = 'picker';
+  pushOverlay();
+}
+function onHoldReleased() {
+  if (ui === 'pending') toPicker();
+  else if (ui === 'hold') stopTalk();
+}
+function beginHold() {
+  const to = pickTargets.filter((id) => client && client.members.has(id));
+  if (!to.length) return toPicker();
+  if (!startTalk(to, 'hold')) return toPicker();
+  ui = 'hold';
+  pushOverlay();
+}
+function beginToggle(to) {
+  to = (to || []).filter((id) => client && client.members.has(id));
+  if (!to.length) return toPicker();
+  if (!startTalk(to, 'toggle')) return;
+  ui = 'toggle';
+  // give the keyboard back to your app while you talk
+  if (overlay) {
+    overlay.blur();
+    overlay.setIgnoreMouseEvents(true, { forward: true });
+  }
+  pushOverlay();
+}
+
+// ---------- the Mac helper ----------
+const helperCalls = new Map();
+let helperId = 0;
+function helperPath() {
+  if (!isMac) return null;
+  const p = app.isPackaged ? path.join(process.resourcesPath, 'talkie-helper') : path.join(__dirname, '..', '..', 'build', 'helper', 'talkie-helper');
+  return fs.existsSync(p) ? p : null;
+}
+function startHelper() {
+  const p = helperPath();
+  if (!p) return;
+  const child = spawn(p, ['com.leadandallure.talkie'], { stdio: ['pipe', 'pipe', 'ignore'] });
+  helper = child;
+  let buf = '';
+  child.stdout.on('data', (d) => {
+    buf += d.toString('utf8');
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      onHelper(msg);
+    }
+  });
+  child.on('exit', () => {
+    if (helper === child) helper = null;
+    if (!app.isQuitting) setTimeout(startHelper, 3000);
+  });
+  child.on('error', () => {});
+}
+function helperSend(obj) {
+  if (helper && helper.stdin.writable) helper.stdin.write(JSON.stringify(obj) + '\n');
+}
+function helperCall(obj, timeout = 60000) {
+  return new Promise((resolve) => {
+    if (!helper) return resolve(null);
+    const id = 'c' + ++helperId;
+    const t = setTimeout(() => {
+      helperCalls.delete(id);
+      resolve(null);
+    }, timeout);
+    helperCalls.set(id, (v) => {
+      clearTimeout(t);
+      resolve(v);
+    });
+    helperSend({ ...obj, id });
+  });
+}
+function onHelper(msg) {
+  if (msg.ev === 'ready') {
+    helperCaps = { transcribe: !!msg.transcribe, ai: msg.ai || 'unsupported' };
+    helperSend({ cmd: 'jumpback', on: !!settings.jumpBack });
+    pushState();
+    // transcribe anything that arrived before the helper was ready
+    for (const m of messages) if (m.chunks && m.text === undefined) queueTranscribe(m.tid);
+    return;
+  }
+  if (msg.ev === 'hold-released') return onHoldReleased();
+  if (msg.ev === 'jumped') return;
+  const cb = msg.id != null && helperCalls.get(msg.id);
+  if (cb) {
+    helperCalls.delete(msg.id);
+    cb(msg);
+  }
+}
+
+// ---------- voice to text, on this computer ----------
+const tq = [];
+let tBusy = false;
+function queueTranscribe(tid) {
+  if (!helperCaps.transcribe || tq.includes(tid)) return;
+  tq.push(tid);
+  pumpTranscribe();
+}
+async function pumpTranscribe() {
+  if (tBusy || !client) return;
+  const tid = tq.shift();
+  if (!tid) return;
+  tBusy = true;
+  const m = messages.find((x) => x.tid === tid);
+  const wav = path.join(app.getPath('temp'), 'talkie-' + process.pid + '-' + tid + '.wav');
+  try {
+    const packets = m && m.chunks ? client.openEnvelope(m) : null;
+    if (packets && packets.length) {
+      m.transcribing = true;
+      pushState();
+      const bytes = await audioCall({ cmd: 'decode-wav', packets });
+      if (bytes && bytes.length > 44) {
+        fs.writeFileSync(wav, Buffer.from(bytes), { mode: 0o600 });
+        if (process.env.TALKIE_TEST_KEEPWAV) fs.copyFileSync(wav, process.env.TALKIE_TEST_KEEPWAV + '-' + settings.name + '.wav');
+        const r = await helperCall({ cmd: 'transcribe', path: wav, locale: app.getSystemLocale ? app.getSystemLocale() : app.getLocale() });
+        m.text = r && typeof r.text === 'string' ? r.text : '';
+      } else m.text = '';
+      delete m.transcribing;
+      saveMessages();
+      pushState();
+    }
+  } catch (e) {
+    console.error('transcribe', e.message);
+    if (m) delete m.transcribing;
+  } finally {
+    try {
+      fs.unlinkSync(wav);
+    } catch {}
+    tBusy = false;
+    setImmediate(pumpTranscribe);
+  }
+}
+
+// ---------- chat summaries ----------
+const LABELS = { decision: 'Decision', problem: 'Problem', solved: 'Solved', todo: 'To do', point: 'Point' };
+function simpleSummary(list) {
+  // used when Apple's on-device model is not switched on: picks out the sentences that matter
+  const rules = [
+    ['decision', /\b(decided|decide|agreed|agree|let's|we'll|we will|going to|go with|settled on|the plan is)\b/i],
+    ['solved', /\b(fixed|solved|sorted|resolved|works now|working now|the fix|workaround)\b/i],
+    ['problem', /\b(problem|issue|bug|broken|error|stuck|can't|cannot|doesn't work|not working|failing|failed)\b/i],
+    ['todo', /\b(need to|needs to|have to|i'll|i will|to do|follow up|tomorrow|by (monday|tuesday|wednesday|thursday|friday|tonight))\b/i],
+  ];
+  const lines = [];
+  const seen = new Set();
+  for (const m of list.slice().reverse()) {
+    if (!m.text) continue;
+    for (const sentence of m.text.split(/(?<=[.!?])\s+/)) {
+      const r = rules.find(([, re]) => re.test(sentence));
+      if (!r) continue;
+      const t = sentence.trim().replace(/\s+/g, ' ').slice(0, 160);
+      if (t.split(' ').length < 5 || seen.has(t.toLowerCase())) continue; // skip fragments and repeats
+      seen.add(t.toLowerCase());
+      lines.push({ kind: r[0], text: memberName2(m.from) + ': ' + t });
+    }
+    if (lines.length >= 10) break;
+  }
+  const order = ['decision', 'problem', 'solved', 'todo'];
+  return lines.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)).slice(0, 8);
+}
+function parseSummary(text) {
+  const out = [];
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.replace(/^[\s\-*•\d.]+/, '').trim();
+    const m = line.match(/^(Decision|Problem|Solved|To do|Point)\s*:\s*(.+)$/i);
+    if (!m) continue;
+    const kind = Object.keys(LABELS).find((k) => LABELS[k].toLowerCase() === m[1].toLowerCase()) || 'point';
+    out.push({ kind, text: m[2].trim().slice(0, 200) });
+  }
+  return out.slice(0, 8);
+}
+async function summarise(key) {
+  const list = messages.filter((m) => chatKey(m) === key);
+  const withText = list.filter((m) => m.text);
+  const prev = chats[key];
+  if (prev && prev.upto === withText.length && (prev.source === 'apple' || helperCaps.ai !== 'available')) return prev;
+  let res = null;
+  if (withText.length && helperCaps.ai === 'available') {
+    const transcript = withText.map((m) => memberName2(m.from) + ': ' + m.text).join('\n');
+    const r = await helperCall({ cmd: 'summarize', text: transcript }, 90000);
+    if (r && r.text) res = { lines: parseSummary(r.text), source: 'apple' };
+  }
+  if (!res) res = { lines: simpleSummary(withText), source: 'simple' };
+  chats[key] = { ...res, upto: withText.length, at: Date.now() };
+  saveChats();
+  return chats[key];
+}
+
+// ---------- main window (chats, people, settings) ----------
+// Made only when you open it, and closed for real when you close it, so it costs nothing in between.
 function securePrefs(preload) {
   return {
     preload: path.join(__dirname, preload),
@@ -279,8 +653,8 @@ function hardenContents(wc) {
 
 function createMainWindow() {
   mainWin = new BrowserWindow({
-    width: 400,
-    height: 660,
+    width: 420,
+    height: 680,
     minWidth: 340,
     minHeight: 480,
     show: false,
@@ -288,26 +662,30 @@ function createMainWindow() {
     backgroundColor: '#0f1412',
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     autoHideMenuBar: true,
-    webPreferences: securePrefs('preload.js'),
+    webPreferences: { ...securePrefs('preload.js'), backgroundThrottling: true },
   });
   mainWin.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-  mainWin.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      mainWin.hide();
-    }
+  mainWin.once('ready-to-show', () => {
+    if (isMac) app.focus({ steal: true });
+    mainWin.show();
+    mainWin.focus();
+  });
+  mainWin.on('closed', () => {
+    mainWin = null;
+    if (isMac && app.dock && settings.name) app.dock.hide();
   });
   mainWin.webContents.on('did-finish-load', pushState);
   hardenContents(mainWin.webContents);
 }
 function showMain() {
-  if (!mainWin) return;
+  if (isMac && app.dock) app.dock.show(); // while the window is open you can Cmd+Tab to it
+  if (!mainWin || mainWin.isDestroyed()) return createMainWindow();
   if (isMac) app.focus({ steal: true });
   mainWin.show();
   mainWin.focus();
 }
 
-// ---------- tray ----------
+// ---------- tray (menu bar icon) ----------
 function trayIcon() {
   const p = path.join(__dirname, '..', '..', 'build', isMac ? 'trayTemplate.png' : 'tray.png');
   const img = nativeImage.createFromPath(p);
@@ -316,19 +694,22 @@ function trayIcon() {
 }
 function refreshTray() {
   if (!tray) return;
+  const sig = JSON.stringify([settings.dnd, !!talking, pending().length, !!updateInfo, connState, settings.jumpBack, settings.hotkeys]);
+  if (sig === refreshTray.sig) return;
+  refreshTray.sig = sig;
   const menu = Menu.buildFromTemplate([
-    { label: 'Open Talkie', click: showMain },
+    { label: 'Open Talkie (chats and settings)', click: showMain },
     { type: 'separator' },
+    { label: talking ? 'Send' : 'Talk...', accelerator: settings.hotkeys.talk, click: onTalkKey },
+    { label: 'Play next message', accelerator: settings.hotkeys.listen, click: () => playNext(), enabled: pending().length > 0 },
     {
       label: 'Do not disturb',
       type: 'checkbox',
       checked: settings.dnd,
       click: (item) => setDnd(item.checked),
     },
-    { label: talking ? 'Stop talking' : 'Talk to selected', accelerator: settings.hotkeys.talk, click: toggleTalk },
-    { label: 'Play next message', accelerator: settings.hotkeys.listen, click: () => playNext(), enabled: pending().length > 0 },
     { type: 'separator' },
-    updateInfo ? { label: 'Update available: ' + updateInfo.version, click: () => shell.openExternal(RELEASES_PAGE) } : { label: 'Version ' + app.getVersion(), enabled: false },
+    updateInfo ? { label: 'Update available: ' + updateInfo.version, click: () => shell.openExternal(RELEASES_PAGE) } : { label: 'Version ' + app.getVersion() + (connState === 'online' ? '' : ' (offline)'), enabled: false },
     { label: 'Quit Talkie', click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
@@ -342,7 +723,7 @@ function registerHotkeys() {
   for (const [action, accel] of Object.entries(settings.hotkeys)) {
     if (!accel) continue;
     try {
-      result[action] = globalShortcut.register(accel, action === 'talk' ? toggleTalk : () => playNext());
+      result[action] = globalShortcut.register(accel, action === 'talk' ? onTalkKey : () => playNext());
     } catch {
       result[action] = false;
     }
@@ -441,7 +822,7 @@ async function connect() {
     if (r.kind === 'snooze') toast(`${n}: give me ${r.minutes} min`, 6000);
     else if (r.kind === 'heard') toast(`${n} listened to your message`, 4000);
     else if (r.kind === 'later') toast(`${n} will listen later`, 4000);
-    sendMain('sound', 'notify-soft');
+    sound('notify-soft');
   });
   const url = await discoverServer();
   if (!url) {
@@ -455,6 +836,7 @@ async function connect() {
 
 function sendMain(ch, data) {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(ch, data);
+  else if (ch === 'notice') toast(data, 7000);
 }
 
 // ---------- receiving ----------
@@ -468,9 +850,8 @@ function onQueued(list) {
   }
   saveMessages();
   client.ackQueue(got);
-  if (got.length) {
-    sendMain('sound', 'notify');
-  }
+  if (got.length) sound('notify');
+  for (const tid of got) queueTranscribe(tid);
   pushState();
 }
 
@@ -480,9 +861,9 @@ function onTxStart(t) {
   live.set(t.tid, rec);
   if (playLive) {
     liveNow = { tid: t.tid, name: memberName(t.from) };
-    sendMain('audio', { cmd: 'live-start', tid: t.tid });
+    sendAudio({ cmd: 'live-start', tid: t.tid });
   } else if (settings.soundInDnd) {
-    sendMain('sound', 'notify');
+    sound('notify');
   }
   pushState();
 }
@@ -490,7 +871,7 @@ function onTxChunk(ch) {
   const rec = live.get(ch.tid);
   if (!rec) return;
   rec.chunks.push({ seq: ch.seq, n: ch.n, c: ch.c });
-  if (rec.playLive) sendMain('audio', { cmd: 'live-packet', tid: ch.tid, bytes: ch.bytes });
+  if (rec.playLive) sendAudio({ cmd: 'live-packet', tid: ch.tid, bytes: ch.bytes });
 }
 function onTxEnd(e) {
   const rec = live.get(e.tid);
@@ -501,10 +882,10 @@ function onTxEnd(e) {
   if (rec.chunks.length) {
     messages.push(rec);
     saveMessages();
+    queueTranscribe(rec.tid);
   }
   if (liveNow && liveNow.tid === e.tid) {
-    liveNow = null;
-    sendMain('audio', { cmd: 'live-end', tid: e.tid });
+    sendAudio({ cmd: 'live-end', tid: e.tid });
   }
   pushState();
 }
@@ -517,9 +898,9 @@ function playMessage(tid) {
     sendMain('notice', 'Could not open that message (the sender is no longer on the team).');
     return;
   }
-  sendMain('audio', { cmd: 'play', tid, packets, name: memberName(m.from) });
+  sendAudio({ cmd: 'play', tid, packets, name: memberName(m.from) });
   liveNow = { tid, name: memberName(m.from), replay: true };
-  if (!m.heard) {
+  if (!m.heard && !m.mine) {
     m.heard = true;
     delete m.snoozedUntil;
     saveMessages();
@@ -544,7 +925,7 @@ function snooze(tid, minutes = 5) {
     setTimeout(() => {
       delete m.snoozedUntil;
       saveMessages();
-      sendMain('sound', 'notify');
+      sound('notify');
       pushState();
     }, minutes * 60000),
   );
@@ -580,40 +961,47 @@ function setDnd(on) {
   pushState();
 }
 
-function startTalk(targets) {
-  if (talking || !client) return;
+function startTalk(targets, how = 'toggle') {
+  if (talking || !client) return false;
   if (connState !== 'online') {
-    toast('Not connected yet', 2500);
-    return;
+    toast('Not connected yet. Check your internet.', 3000);
+    return false;
   }
-  const to = (targets || settings.selected).filter((id) => client.members.has(id));
-  if (!to.length) {
-    showMain();
-    sendMain('notice', 'Tick who you want to talk to first.');
-    return;
-  }
+  const to = (targets || []).filter((id) => client.members.has(id));
+  if (!to.length) return false;
   const tx = client.startTx(to);
-  if (!tx) return;
-  talking = { tid: tx.tid, to: tx.to, started: Date.now() };
-  sendMain('audio', { cmd: 'capture-start', tid: tx.tid });
+  if (!tx) return false;
+  talking = { tid: tx.tid, to: tx.to, started: Date.now(), key: tx.key, chunks: [], how };
+  settings.selected = tx.to;
+  saveSettings();
+  sendAudio({ cmd: 'capture-start', tid: tx.tid });
   pushState();
+  return true;
 }
 function stopTalk() {
-  if (!talking) return;
-  sendMain('audio', { cmd: 'capture-stop', tid: talking.tid });
-  // the renderer replies with capture-done once the last packet is out
+  if (!talking || talking.stopping) return;
+  talking.stopping = true;
+  sendAudio({ cmd: 'capture-stop', tid: talking.tid });
+  // the audio engine answers with capture-done once the last packet is out
   const tid = talking.tid;
   setTimeout(() => finishTalk(tid), 1500);
+  if (ui === 'hold' || ui === 'toggle' || ui === 'pending') closePicker();
 }
 function finishTalk(tid, dur) {
   if (!talking || talking.tid !== tid) return;
-  client.endTx(tid, dur || (Date.now() - talking.started) / 1000);
+  const t = talking;
+  const d = dur || (Date.now() - t.started) / 1000;
+  client.endTx(tid, d);
   talking = null;
+  ui = 'idle';
+  if (t.chunks.length) {
+    // keep our own copy, sealed to ourselves, for the chat history
+    messages.push({ tid, from: client.id, to: t.to, at: t.started, dur: d, key: client.sealForSelf(t.key), chunks: t.chunks, heard: true, mine: true });
+    saveMessages();
+    queueTranscribe(tid);
+  }
+  closePicker();
   pushState();
-}
-function toggleTalk() {
-  if (talking) stopTalk();
-  else startTalk();
 }
 
 // ---------- updates ----------
@@ -676,43 +1064,57 @@ function setupIpc() {
     await connect();
     return { ok: true };
   });
-  on('select', (ids) => {
-    if (!Array.isArray(ids)) return;
-    settings.selected = ids.filter((x) => typeof x === 'string').slice(0, 50);
-    saveSettings();
-    pushState();
+  // picker (overlay) -> main
+  on('picker-hi', (to) => {
+    if (Array.isArray(to)) pickTargets = to.filter((x) => typeof x === 'string').slice(0, 50);
+  });
+  on('picker-talk', (to) => {
+    if (!Array.isArray(to)) return;
+    if (talking) return stopTalk();
+    beginToggle(to.filter((x) => typeof x === 'string').slice(0, 50));
+  });
+  on('picker-close', () => closePicker());
+  on('keys-up', () => {
+    // fallback for the hold when there is no helper: the overlay saw the keys go up
+    if (!helper) onHoldReleased();
   });
   on('talk', (arg) => {
-    if (arg && arg.action === 'start') startTalk(arg.to);
+    if (arg && arg.action === 'start' && Array.isArray(arg.to)) startTalk(arg.to, arg.how === 'hold' ? 'hold' : 'toggle');
     else if (arg && arg.action === 'stop') stopTalk();
-    else toggleTalk();
+    else if (talking) stopTalk();
   });
   on('dnd', (onOff) => setDnd(onOff));
   on('play', (tid) => playMessage(tid));
   on('play-next', () => playNext());
+  on('stop-audio', () => {
+    sendAudio({ cmd: 'stop-all' });
+    liveNow = null;
+    pushState();
+  });
   on('snooze', ({ tid, minutes }) => snooze(tid, minutes));
   on('later', (tid) => later(tid));
   on('reply-to', (tid) => {
     const m = messages.find((x) => x.tid === tid);
     if (!m) return;
-    // answering straight away: the box goes, the message stays in the list
+    // answering straight away: the box goes, the message stays in the chat
     if (!m.heard) {
-      m.snoozedUntil = Date.now() + 365 * 24 * 3600 * 1000;
+      m.heard = true;
+      delete m.snoozedUntil;
       saveMessages();
+      client && client.reply(m.from, m.tid, 'heard');
     }
-    settings.selected = [m.from];
-    saveSettings();
-    startTalk([m.from]);
-  });
-  on('talk-to', (id) => {
-    if (typeof id !== 'string') return;
-    settings.selected = [id];
-    saveSettings();
-    startTalk([id]);
+    beginToggle([m.from]);
   });
   on('delete-message', (tid) => {
     messages = messages.filter((m) => m.tid !== tid);
     saveMessages();
+    pushState();
+  });
+  on('delete-chat', (key) => {
+    messages = messages.filter((m) => chatKey(m) !== key);
+    delete chats[key];
+    saveMessages();
+    saveChats();
     pushState();
   });
   on('trust-key', (id) => client && client.trustNewKey(id));
@@ -745,23 +1147,30 @@ function setupIpc() {
       settings.openAtLogin = !!value;
       applyLoginItem();
     }
+    if (key === 'jumpBack') {
+      settings.jumpBack = !!value;
+      helperSend({ cmd: 'jumpback', on: settings.jumpBack });
+    }
     saveSettings();
     pushState();
   });
   on('open-main', showMain);
   on('open-releases', () => shell.openExternal(RELEASES_PAGE));
   on('overlay-interactive', (yes) => {
-    if (overlay) overlay.setIgnoreMouseEvents(!yes, { forward: true });
+    if (!overlay) return;
+    if (ui === 'picker' || ui === 'pending') return; // the picker keeps the mouse
+    overlay.setIgnoreMouseEvents(!yes, { forward: true });
   });
   // audio engine -> main
   on('audio-packet', ({ tid, bytes }) => {
-    if (talking && talking.tid === tid && bytes && bytes.length) client.sendPacket(tid, new Uint8Array(bytes));
+    if (!talking || talking.tid !== tid || !bytes || !bytes.length) return;
+    const ch = client.sendPacket(tid, new Uint8Array(bytes));
+    if (ch) talking.chunks.push(ch);
   });
   on('capture-done', ({ tid, dur }) => finishTalk(tid, dur));
   on('capture-error', ({ tid, message }) => {
     if (talking && talking.tid === tid) finishTalk(tid);
-    showMain();
-    sendMain('notice', 'Microphone problem: ' + message + (isMac ? ' (System Settings > Privacy & Security > Microphone > turn on Talkie)' : ''));
+    toast('Microphone problem: ' + message + (isMac ? '. Open System Settings > Privacy & Security > Microphone and turn on Talkie.' : ''), 9000);
   });
   on('playback-done', ({ tid }) => {
     if (liveNow && liveNow.tid === tid) {
@@ -769,16 +1178,26 @@ function setupIpc() {
       pushState();
     }
   });
+  on('audio-result', ({ rid, value }) => {
+    const cb = audioCalls.get(rid);
+    if (cb) {
+      audioCalls.delete(rid);
+      cb(value);
+    }
+  });
   handle('state', () => snapshot());
+  handle('chat', (key) => (typeof key === 'string' ? chatDetail(key) : null));
+  handle('summarise', async (key) => (typeof key === 'string' ? summarise(key) : null));
   handle('leave-team', () => {
     if (client) client.leave();
-    for (const f of ['identity.enc', 'identity.json', 'messages.json']) {
+    for (const f of ['identity.enc', 'identity.json', 'messages.json', 'chats.json']) {
       try {
         fs.unlinkSync(file(f));
       } catch {}
     }
     identity = null;
     messages = [];
+    chats = {};
     settings.name = '';
     settings.pinned = {};
     settings.selected = [];
@@ -810,23 +1229,38 @@ function runTestMode() {
   setInterval(async () => {
     let stats = {};
     try {
-      stats = await mainWin.webContents.executeJavaScript('JSON.parse(JSON.stringify(window.__talkieStats || {}))');
+      stats = await overlay.webContents.executeJavaScript('JSON.parse(JSON.stringify(window.__talkieStats || {}))');
     } catch {}
-    log({ conn: connState, members: memberList().map((m) => m.name + (m.online ? '+' : '-') + (m.dnd ? 'D' : '')), messages: messages.length, pending: pending().length, talking: !!talking, live: !!liveNow, stats, overlay: overlayState() });
+    log({ conn: connState, ui, members: memberList().map((m) => m.name + (m.online ? '+' : '-') + (m.dnd ? 'D' : '')), messages: messages.length, texts: messages.map((m) => (m.mine ? 'me:' : '') + (m.text === undefined ? '?' : m.text)), pending: pending().length, talking: !!talking, live: !!liveNow, overlayVisible: overlay.isVisible(), helper: helperCaps, stats });
     const target = process.env.TALKIE_TEST_TALK_TO;
     if (target && !talked && connState === 'online') {
       const m = memberList().find((x) => x.name === target && x.online);
       if (!m) return;
       talked = true;
-      settings.selected = [m.id];
       log({ action: 'talk-start', to: target });
-      startTalk([m.id]);
+      beginToggle([m.id]);
       setTimeout(() => {
         log({ action: 'talk-stop' });
         stopTalk();
-      }, 3000);
+      }, Number(process.env.TALKIE_TEST_SECS || 3) * 1000);
     }
     if (process.env.TALKIE_TEST_PLAY && pending().length) playNext();
+    if (process.env.TALKIE_TEST_PICKER && !runTestMode.picked && connState === 'online') {
+      runTestMode.picked = true;
+      const front = async () => ((await helperCall({ cmd: 'front' }, 2000)) || {}).app;
+      log({ action: 'picker-open', frontBefore: await front() });
+      onTalkKey();
+      setTimeout(async () => log({ action: 'picker-shown', ui, visible: overlay.isVisible(), focused: overlay.isFocused(), bounds: overlay.getBounds(), frontDuring: await front() }), 1200);
+      setTimeout(async () => {
+        if (!process.env.TALKIE_TEST_KEEP) closePicker();
+        setTimeout(async () => log({ action: 'picker-closed', ui, visible: overlay.isVisible(), frontAfter: await front() }), 500);
+      }, 2500);
+    }
+    if (process.env.TALKIE_TEST_SUMMARY && !runTestMode.summed && messages.some((m) => m.text)) {
+      runTestMode.summed = true;
+      const key = chatKey(messages.find((m) => m.text));
+      log({ action: 'summary', result: await summarise(key) });
+    }
   }, 1000);
 }
 
@@ -834,6 +1268,8 @@ function runTestMode() {
 app.on('second-instance', showMain);
 app.on('before-quit', () => {
   app.isQuitting = true;
+  saveMessagesNow();
+  if (helper) helper.kill();
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', (e) => e.preventDefault());
@@ -855,8 +1291,8 @@ app.whenReady().then(async () => {
   if (isMac && app.dock && settings.name) app.dock.hide();
 
   setupIpc();
-  createMainWindow();
   createOverlay();
+  startHelper();
   tray = new Tray(trayIcon());
   tray.on('click', () => (isMac ? tray.popUpContextMenu() : showMain()));
   refreshTray();
@@ -865,12 +1301,12 @@ app.whenReady().then(async () => {
   restoreSnoozes();
 
   if (process.env.TALKIE_TEST) runTestMode();
-  if (identity && settings.name) {
-    connect();
-  } else {
-    mainWin.once('ready-to-show', showMain);
+  if (process.env.TALKIE_TEST_MAIN) {
+    showMain();
+    mainWin.webContents.once('did-finish-load', () => setTimeout(() => mainWin.webContents.executeJavaScript("document.querySelector('.chat-row') && document.querySelector('.chat-row').click()"), 2500));
   }
+  if (identity && settings.name) connect();
+  else showMain();
   checkUpdate();
   setInterval(checkUpdate, 6 * 3600 * 1000);
-  setInterval(pushOverlay, 1000); // keeps the talking timer ticking
 });

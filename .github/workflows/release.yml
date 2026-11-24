@@ -38,6 +38,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci
+      - name: Build the Mac helper (hold to talk, jump back, speech to text)
+        if: runner.os == 'macOS'
+        run: swift --version && ./helper/build.sh
       - run: npx electron-builder ${{ matrix.target }} --publish never
       - uses: actions/upload-artifact@v4
         with:

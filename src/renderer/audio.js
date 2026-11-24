@@ -19,56 +19,42 @@ const TalkieAudio = (() => {
   }
 
   // ---------- sounds (synthesised, no files) ----------
-  function tone(c, freq, start, dur, vol, type = 'square') {
+  // Small, soft, low sounds: gentle sine "blips", no static, quiet even at full volume.
+  let muted = false;
+  function blip(c, freq, start, dur, vol) {
     const o = c.createOscillator();
     const g = c.createGain();
-    o.type = type;
+    o.type = 'sine';
     o.frequency.setValueAtTime(freq, start);
-    g.gain.setValueAtTime(0, start);
-    g.gain.linearRampToValueAtTime(vol, start + 0.005);
-    g.gain.setValueAtTime(vol, start + dur - 0.01);
-    g.gain.linearRampToValueAtTime(0, start + dur);
+    g.gain.setValueAtTime(0.0001, start);
+    g.gain.exponentialRampToValueAtTime(vol, start + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
     o.connect(g).connect(c.destination);
     o.start(start);
     o.stop(start + dur + 0.02);
   }
-  function squelch(c, start, dur, vol) {
-    const len = Math.floor(c.sampleRate * dur);
-    const b = c.createBuffer(1, len, c.sampleRate);
-    const d = b.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
-    const s = c.createBufferSource();
-    s.buffer = b;
-    const f = c.createBiquadFilter();
-    f.type = 'bandpass';
-    f.frequency.value = 2200;
-    f.Q.value = 0.8;
-    const g = c.createGain();
-    g.gain.value = vol;
-    s.connect(f).connect(g).connect(c.destination);
-    s.start(start);
-  }
   function sound(kind) {
+    if (muted) return;
     const c = getCtx();
     const t = c.currentTime + 0.02;
     if (kind === 'start') {
-      // the classic "key up" chirp
-      squelch(c, t, 0.07, 0.25);
-      tone(c, 1250, t + 0.06, 0.05, 0.08);
-      tone(c, 1650, t + 0.11, 0.06, 0.08);
+      // two soft notes going up: "you're on"
+      blip(c, 523, t, 0.09, 0.05);
+      blip(c, 659, t + 0.07, 0.11, 0.05);
     } else if (kind === 'end') {
-      // roger beep and a short burst of static
-      tone(c, 1650, t, 0.05, 0.07);
-      tone(c, 1100, t + 0.05, 0.08, 0.07);
-      squelch(c, t + 0.13, 0.12, 0.22);
+      // the same two notes going down: "sent"
+      blip(c, 659, t, 0.09, 0.045);
+      blip(c, 523, t + 0.07, 0.13, 0.045);
     } else if (kind === 'notify') {
-      squelch(c, t, 0.05, 0.18);
-      tone(c, 1400, t + 0.05, 0.05, 0.07);
-      tone(c, 1400, t + 0.15, 0.05, 0.07);
+      // someone wants you: two gentle taps
+      blip(c, 587, t, 0.12, 0.05);
+      blip(c, 587, t + 0.16, 0.12, 0.05);
     } else if (kind === 'notify-soft') {
-      tone(c, 1500, t, 0.04, 0.04, 'sine');
-      tone(c, 2000, t + 0.06, 0.05, 0.04, 'sine');
+      blip(c, 659, t, 0.1, 0.03);
     }
+  }
+  function setMuted(v) {
+    muted = !!v;
   }
 
   // ---------- packet format: [count][len hi][len lo]...[frames...] ----------
@@ -118,6 +104,33 @@ const TalkieAudio = (() => {
     return { codec: 'opus', sampleRate: RATE, numberOfChannels: 1, bitrate: 24000 };
   }
 
+  // Open the microphone a moment early (when the keys go down), so the first word is not cut off.
+  // If nobody talks within a few seconds it is closed again.
+  const MIC = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 };
+  let warmStream = null;
+  let warmTimer = null;
+  async function warm() {
+    try {
+      ensureWorklet(getCtx());
+      if (!warmStream) warmStream = navigator.mediaDevices.getUserMedia({ audio: MIC });
+      clearTimeout(warmTimer);
+      warmTimer = setTimeout(async () => {
+        const s = warmStream;
+        warmStream = null;
+        if (s) (await s.catch(() => null))?.getTracks().forEach((t) => t.stop());
+      }, 6000);
+    } catch {}
+  }
+  function takeStream() {
+    if (warmStream) {
+      const s = warmStream;
+      warmStream = null;
+      clearTimeout(warmTimer);
+      return s;
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: MIC });
+  }
+
   async function startCapture(tid, onPacket, onError) {
     stopCaptureNow();
     const me = { tid, stopped: false, frames: [], ts: 0, started: performance.now() };
@@ -126,9 +139,7 @@ const TalkieAudio = (() => {
       const c = getCtx();
       sound('start');
       await ensureWorklet(c);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-      });
+      const stream = await takeStream();
       if (me.stopped) {
         stream.getTracks().forEach((t) => t.stop());
         return;
@@ -208,6 +219,7 @@ const TalkieAudio = (() => {
       this.sources = new Set();
       this.ended = false;
       this.gain = this.c.createGain();
+      this.gain.gain.value = muted ? 0 : 1;
       this.gain.connect(this.c.destination);
       this.dec = new AudioDecoder({ output: (ad) => this.out(ad), error: (e) => console.error('decode', e) });
       this.dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: 1 });
@@ -309,5 +321,67 @@ const TalkieAudio = (() => {
     for (const p of [...players.values()]) p.stop();
   }
 
-  return { sound, startCapture, stopCapture, liveStart, livePacket, liveEnd, play, stopAll, stats, getCtx };
+  // ---------- for speech to text: packets -> 16 kHz mono WAV (stays on this computer) ----------
+  async function decodeToWav(packets) {
+    const parts = [];
+    let total = 0;
+    const dec = new AudioDecoder({
+      output: (ad) => {
+        const f = new Float32Array(ad.numberOfFrames);
+        try {
+          ad.copyTo(f, { planeIndex: 0, format: 'f32-planar' });
+          parts.push(f);
+          total += f.length;
+        } catch {}
+        ad.close();
+      },
+      error: () => {},
+    });
+    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: 1 });
+    let ts = 0;
+    for (const pk of packets) {
+      for (const fr of unpack(new Uint8Array(pk))) {
+        dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: ts, duration: FRAME_US, data: fr }));
+        ts += FRAME_US;
+      }
+    }
+    await dec.flush();
+    dec.close();
+    const n = Math.floor(total / 3);
+    const out = new Uint8Array(44 + n * 2);
+    const v = new DataView(out.buffer);
+    const w = (o, str) => [...str].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+    w(0, 'RIFF');
+    v.setUint32(4, 36 + n * 2, true);
+    w(8, 'WAVE');
+    w(12, 'fmt ');
+    v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true);
+    v.setUint32(24, 16000, true);
+    v.setUint32(28, 32000, true);
+    v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true);
+    w(36, 'data');
+    v.setUint32(40, n * 2, true);
+    // average every 3 samples: 48 kHz -> 16 kHz
+    let o = 44;
+    let acc = 0;
+    let k = 0;
+    for (const f of parts) {
+      for (let i = 0; i < f.length; i++) {
+        acc += f[i];
+        if (++k === 3) {
+          const s = Math.max(-1, Math.min(1, acc / 3));
+          if (o < out.length) v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+          o += 2;
+          acc = 0;
+          k = 0;
+        }
+      }
+    }
+    return out;
+  }
+
+  return { sound, setMuted, warm, startCapture, stopCapture, liveStart, livePacket, liveEnd, play, stopAll, decodeToWav, stats, getCtx };
 })();

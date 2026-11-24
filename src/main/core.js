@@ -264,9 +264,10 @@ class RelayClient extends EventEmitter {
 
   // Decrypt a stored envelope (queued or saved live) into raw audio packets.
   openEnvelope(env) {
-    const sender = this.members.get(env.from);
-    if (!sender) return null;
-    const key = openKey(env.key, sender.boxPub, this.identity.boxSec);
+    // our own sent messages are sealed to ourselves
+    const senderBox = env.from === this.id ? this.identity.boxPub : (this.members.get(env.from) || {}).boxPub;
+    if (!senderBox) return null;
+    const key = openKey(env.key, senderBox, this.identity.boxSec);
     if (!key) return null;
     const packets = [];
     for (const ch of [...env.chunks].sort((a, b) => a.seq - b.seq)) {
@@ -299,13 +300,19 @@ class RelayClient extends EventEmitter {
     this.txKeys.set(tid, key);
     this._outSeq = 0;
     this._send({ t: 'tx-start', tid, to, keys });
-    return { tid, to };
+    return { tid, to, key };
   }
   sendPacket(tid, bytes) {
     const key = this.txKeys.get(tid);
-    if (!key) return false;
+    if (!key) return null;
     const ch = sealChunk(bytes, key);
-    return this._send({ t: 'tx-chunk', tid, seq: this._outSeq++, n: ch.n, c: ch.c });
+    const out = { seq: this._outSeq++, n: ch.n, c: ch.c };
+    this._send({ t: 'tx-chunk', tid, ...out });
+    return out; // the sealed chunk, so the sender can keep its own copy
+  }
+  // Seal a transmission key to ourselves, to keep our own copy of what we said.
+  sealForSelf(key) {
+    return sealKey(key, this.identity.boxPub, this.identity.boxSec);
   }
   endTx(tid, dur) {
     this.txKeys.delete(tid);

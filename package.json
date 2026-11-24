@@ -1,7 +1,7 @@
 {
   "name": "talkie",
   "productName": "Talkie",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Push-to-talk walkie-talkie for your team, end-to-end encrypted, without leaving what you are working on.",
   "main": "src/main/main.js",
   "author": "Lead & Allure",
@@ -61,7 +61,14 @@
       "gatekeeperAssess": false,
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Talkie uses the microphone only while you are talking to your team."
-      }
+      },
+      "extraResources": [
+        {
+          "from": "build/helper/talkie-helper",
+          "to": "talkie-helper"
+        }
+      ],
+      "minimumSystemVersion": "13.0"
     },
     "dmg": {
       "title": "Talkie"
@@ -93,6 +100,11 @@
       ],
       "category": "Network"
     },
-    "publish": null
+    "publish": null,
+    "electronLanguages": [
+      "en",
+      "en-GB",
+      "en-US"
+    ]
   }
 }
