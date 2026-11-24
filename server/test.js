@@ -118,6 +118,26 @@ function once(em, ev, timeout = 4000) {
   assert.match(core.safetyCode(a.identity.signPub, a.identity.boxPub), /^\d{5}( \d{5}){5}$/);
   console.log('ok  safety code format');
 
+  // someone in the house keeps typing the wrong code: newcomers are blocked, members are not
+  for (let i = 0; i < 9; i++) {
+    const w = mk('Guess' + i, 'TK-WRONG-CODE-' + i);
+    const e = once(w, 'server-error');
+    w.connect(url);
+    await e;
+    w.close();
+  }
+  const late = mk('Late');
+  const lateErr = once(late, 'server-error');
+  late.connect(url);
+  assert.strictEqual((await lateErr).code, 'rate_limited');
+  late.close();
+  const again = new core.RelayClient({ identity: a.identity, name: 'George', code: '' });
+  const welcomeP = once(again, 'welcome');
+  again.connect(url);
+  await welcomeP;
+  again.close();
+  console.log('ok  wrong codes block newcomers but never existing members on the same address');
+
   for (const x of [a, b, c2]) x.close();
   server.close();
   fs.rmSync(dataDir, { recursive: true, force: true });

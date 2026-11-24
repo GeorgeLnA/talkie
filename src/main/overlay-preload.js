@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const SEND = new Set([
   'play', 'snooze', 'later', 'reply-to', 'open-main', 'overlay-interactive', 'talk', 'stop-audio',
-  'picker-hi', 'picker-talk', 'picker-close', 'keys-up',
+  'picker-hi', 'picker-talk', 'picker-close', 'picker-chats', 'picker-dnd', 'keys-up',
   'audio-packet', 'capture-done', 'capture-error', 'playback-done', 'audio-result',
 ]);
 

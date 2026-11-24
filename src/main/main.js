@@ -288,6 +288,7 @@ function overlayState() {
     incomingDnd: [...live.values()].filter((r) => !r.playLive).map((r) => memberName(r.from)),
     pending: first ? { tid: first.tid, from: first.from, name: memberName(first.from), dur: first.dur, count: p.length, text: first.text || '' } : null,
     toast: overlayToast,
+    unheard: pending().length,
     hotkeys: settings.hotkeys,
     test: !!process.env.TALKIE_TEST, // automated tests stay silent
   };
@@ -1074,6 +1075,11 @@ function setupIpc() {
     beginToggle(to.filter((x) => typeof x === 'string').slice(0, 50));
   });
   on('picker-close', () => closePicker());
+  on('picker-chats', () => {
+    closePicker();
+    showMain();
+  });
+  on('picker-dnd', () => setDnd(!settings.dnd));
   on('keys-up', () => {
     // fallback for the hold when there is no helper: the overlay saw the keys go up
     if (!helper) onHoldReleased();
@@ -1250,7 +1256,22 @@ function runTestMode() {
       const front = async () => ((await helperCall({ cmd: 'front' }, 2000)) || {}).app;
       log({ action: 'picker-open', frontBefore: await front() });
       onTalkKey();
-      setTimeout(async () => log({ action: 'picker-shown', ui, visible: overlay.isVisible(), focused: overlay.isFocused(), bounds: overlay.getBounds(), frontDuring: await front() }), 1200);
+      setTimeout(async () => {
+        log({ action: 'picker-shown', ui, visible: overlay.isVisible(), focused: overlay.isFocused(), bounds: overlay.getBounds(), frontDuring: await front() });
+        const shot = process.env.TALKIE_TEST_SHOT;
+        if (!shot) return;
+        fs.writeFileSync(shot + '-1.png', (await overlay.webContents.capturePage()).toPNG());
+        overlay.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'D' });
+        overlay.webContents.sendInputEvent({ type: 'char', keyCode: 'd' });
+        overlay.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'D' });
+        setTimeout(async () => {
+          log({ action: 'after-d', dnd: settings.dnd });
+          fs.writeFileSync(shot + '-2.png', (await overlay.webContents.capturePage()).toPNG());
+          overlay.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C' });
+          overlay.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C' });
+          setTimeout(() => log({ action: 'after-c', ui, mainOpen: !!(mainWin && !mainWin.isDestroyed() && mainWin.isVisible()), overlayFocused: overlay.isFocused() }), 1500);
+        }, 600);
+      }, 1200);
       setTimeout(async () => {
         if (!process.env.TALKIE_TEST_KEEP) closePicker();
         setTimeout(async () => log({ action: 'picker-closed', ui, visible: overlay.isVisible(), frontAfter: await front() }), 500);

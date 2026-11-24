@@ -4,6 +4,7 @@ Push-to-talk for your team. Hold a shortcut from any app, speak, let go: your vo
 
 - **Hold to talk:** hold `Cmd+Shift+Space` and speak; let go to send. It goes to whoever you talked to last.
 - **Choose who:** tap `Cmd+Shift+Space` instead and a small list opens in the top right corner, under the clock. Arrow keys to choose, Space to add more people (a group), Enter to talk (press the shortcut again to send). Or keep the list open and hold the shortcut to talk to whoever is highlighted. Your app stays in front the whole time.
+- **Chats and Do Not Disturb from the same list:** press `C` (or click **Chats**) to open your chats and messages, and `D` to turn Do Not Disturb on or off. The Chats button shows how many messages are new. You can also open Talkie from Applications or Spotlight, or from its menu bar icon.
 - **Out of the way:** nothing shows on screen unless you are talking, someone is talking to you, or a message is waiting. No Dock icon; Talkie lives in the menu bar.
 - **Do Not Disturb:** voice arrives as a message instead of playing out loud. A green box appears top right: **Play**, **Wait 5 min** (the sender is told), **Later**, or **Reply**.
 - **Chats with text and summaries (Mac):** every conversation is kept as a chat. Speech is turned into text on your own Mac (macOS 26), and each chat gets short bullet points: decisions, problems, what solved them, to-dos. With Apple Intelligence switched on, the summaries are written by Apple's on-device model; otherwise Talkie picks out the key sentences itself. Nothing leaves your computer for this.

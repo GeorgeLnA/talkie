@@ -267,7 +267,10 @@ function handlePreAuth(ws, state, msg, ip) {
   }
   if (msg.t === 'auth') {
     if (!state.nonce) return ws.close(4002, 'no challenge');
-    if (tooManyFails(ip)) {
+    // A member who proves their key is never blocked: housemates share one internet address,
+    // so one person's wrong team codes must not lock everyone else out.
+    const knownMember = !!members[idFor(state.signPub)];
+    if (!knownMember && tooManyFails(ip)) {
       send(ws, { t: 'error', code: 'rate_limited', message: 'Too many attempts. Try again in 10 minutes.' });
       return ws.close(4004, 'rate limited');
     }

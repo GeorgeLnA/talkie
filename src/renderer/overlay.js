@@ -87,6 +87,11 @@ function renderPicker() {
     });
   }
   $('p-empty').classList.toggle('hidden', !open || its.length > 0);
+  $('p-foot').classList.toggle('hidden', !open);
+  $('p-new').classList.toggle('hidden', !S.unheard);
+  $('p-new').textContent = S.unheard ? S.unheard + ' new' : '';
+  $('p-dndstate').textContent = S.dnd ? 'on' : 'off';
+  $('p-dndbtn').classList.toggle('on', !!S.dnd);
   const hint = $('p-hint');
   const hk = prettyKey(S.hotkeys.talk);
   if (holdTalking) {
@@ -126,12 +131,20 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     e.preventDefault();
     talkie.send('picker-close');
+  } else if (e.key === 'c' || e.key === 'C') {
+    e.preventDefault();
+    talkie.send('picker-chats');
+  } else if (e.key === 'd' || e.key === 'D') {
+    e.preventDefault();
+    talkie.send('picker-dnd');
   } else if (/^[1-9]$/.test(e.key) && its[Number(e.key) - 1]) {
     hi = Number(e.key) - 1;
     marked = new Set();
     talkie.send('picker-talk', targets());
   }
 });
+$('p-chats').addEventListener('click', () => talkie.send('picker-chats'));
+$('p-dndbtn').addEventListener('click', () => talkie.send('picker-dnd'));
 window.addEventListener('keyup', (e) => {
   // without the Mac helper, this is how the hold ends
   if (S && (S.ui === 'pending' || S.ui === 'hold') && ['Meta', 'Control', 'Shift'].includes(e.key)) talkie.send('keys-up');
